@@ -62,14 +62,18 @@ import {
   CircleDot,
   Clock3,
   Copy,
+  CornerUpLeft,
   GripVertical,
+  History,
   Lightbulb,
   Lock,
   LockOpen,
   Pause,
+  Play,
   Plus,
   Redo2,
   RefreshCw,
+  RotateCcw,
   Save,
   ShieldCheck,
   SkipForward,
@@ -82,7 +86,10 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import {
   colorPresets,
+  createEmptyExecution,
+  cueBlockReasons,
   detectConflicts,
+  flattenPlan,
   roleLabels,
   statusLabels
 } from './data';
@@ -90,13 +97,23 @@ import {
   LIGHTING_STORAGE_KEY,
   canEditScene,
   canFreeze,
+  canOperateExecution,
   findActivePlan,
   findActiveScene,
   findActiveCue,
   formatTime,
   useLightingDesk
 } from './state/useLightingDesk';
-import type { Cue, CueConflict, LightingPlan, Scene, UserRole, Workspace } from './types';
+import type {
+  Cue,
+  CueConflict,
+  LightingPlan,
+  PersistedState,
+  PlanExecution,
+  Scene,
+  UserRole,
+  Workspace
+} from './types';
 
 const statusColors = {
   draft: 'orange',
@@ -118,12 +135,14 @@ interface SortableCueRowProps {
   cue: Cue;
   index: number;
   selected: boolean;
+  armed: boolean;
+  firedAt: string | undefined;
   disabled: boolean;
   conflicts: CueConflict[];
   onSelect: () => void;
 }
 
-function SortableCueRow({ cue, index, selected, disabled, conflicts, onSelect }: SortableCueRowProps) {
+function SortableCueRow({ cue, index, selected, armed, firedAt, disabled, conflicts, onSelect }: SortableCueRowProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: cue.id,
     disabled
@@ -139,8 +158,8 @@ function SortableCueRow({ cue, index, selected, disabled, conflicts, onSelect }:
       style={style}
       role="option"
       aria-selected={selected}
-      aria-label={`${cue.number} ${cue.label}，${statusLabels[cue.status]}，${conflicts.length} 个冲突`}
-      className={`cue-row ${selected ? 'active' : ''} ${isDragging ? 'dragging' : ''}`}
+      aria-label={`${cue.number} ${cue.label}，${statusLabels[cue.status]}，${conflicts.length} 个冲突${armed ? '，待 GO' : ''}${firedAt ? `，实际 ${firedAt} 触发` : ''}`}
+      className={`cue-row ${selected ? 'active' : ''} ${armed ? 'armed' : ''} ${isDragging ? 'dragging' : ''}`}
       borderBottomWidth="1px"
       borderColor="whiteAlpha.100"
       onClick={onSelect}
@@ -164,13 +183,17 @@ function SortableCueRow({ cue, index, selected, disabled, conflicts, onSelect }:
         </Text>
         <Box w="84px">
           <Text fontFamily="mono" fontWeight="700" color="amber.300">{cue.number}</Text>
-          <Text color="whiteAlpha.500" fontSize="10px">{formatTime(cue.startTime)}</Text>
+          <Text color="whiteAlpha.500" fontSize="10px">计划 {formatTime(cue.startTime)}</Text>
+          {firedAt ? (
+            <Text color="green.300" fontSize="10px" fontFamily="mono">实际 {firedAt}</Text>
+          ) : null}
         </Box>
         <Box className="color-swatch" bg={cue.colorHex} boxSize="14px" flexShrink={0} />
         <Box minW={0} flex="1">
           <Flex align="center" gap={2}>
             <Text fontWeight="650" noOfLines={1}>{cue.label}</Text>
             {cue.followCueId ? <Tag size="sm" variant="subtle" colorScheme="purple">跟随</Tag> : null}
+            {armed ? <Tag size="sm" colorScheme="green">待 GO</Tag> : null}
           </Flex>
           <Text color="whiteAlpha.500" fontSize="xs" noOfLines={1}>
             {cue.position} · {cue.channel} · {cue.color}
@@ -200,13 +223,15 @@ function SortableCueRow({ cue, index, selected, disabled, conflicts, onSelect }:
 interface CueListProps {
   scene: Scene;
   selectedCueId: string;
+  armedCueId: string;
+  firedAtByCue: Map<string, string>;
   canEdit: boolean;
   conflicts: CueConflict[];
   onSelect: (cueId: string) => void;
   onReorder: (activeId: string, overId: string) => void;
 }
 
-function CueList({ scene, selectedCueId, canEdit, conflicts, onSelect, onReorder }: CueListProps) {
+function CueList({ scene, selectedCueId, armedCueId, firedAtByCue, canEdit, conflicts, onSelect, onReorder }: CueListProps) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
@@ -228,6 +253,8 @@ function CueList({ scene, selectedCueId, canEdit, conflicts, onSelect, onReorder
               cue={cue}
               index={index}
               selected={cue.id === selectedCueId}
+              armed={cue.id === armedCueId}
+              firedAt={firedAtByCue.get(cue.id)}
               disabled={!canEdit}
               conflicts={conflicts.filter((item) => item.cueId === cue.id)}
               onSelect={() => onSelect(cue.id)}
@@ -566,6 +593,190 @@ function ComparePlan({
   );
 }
 
+function formatEventClock(at: string) {
+  return new Date(at).toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+interface ExecutionPanelProps {
+  plan: LightingPlan;
+  execution: PlanExecution;
+  selectedCue: Cue | undefined;
+  role: UserRole;
+  conflicts: CueConflict[];
+  onArm: () => void;
+  onGo: () => void;
+  onBack: () => void;
+  onReset: () => void;
+}
+
+function ExecutionPanel({
+  plan,
+  execution,
+  selectedCue,
+  role,
+  conflicts,
+  onArm,
+  onGo,
+  onBack,
+  onReset
+}: ExecutionPanelProps) {
+  const canOperate = canOperateExecution(role);
+  const flat = useMemo(() => flattenPlan(plan), [plan]);
+  const current = execution.currentCueId
+    ? flat.find((item) => item.cue.id === execution.currentCueId)
+    : undefined;
+  const blockReasons = current ? cueBlockReasons(current.cue, conflicts) : [];
+  const lastGo = useMemo(
+    () => [...execution.events].reverse().find((event) => event.type === 'go'),
+    [execution.events]
+  );
+  const goCount = execution.events.filter((event) => event.type === 'go').length;
+  const backCount = execution.events.length - goCount;
+  const finished = !current && execution.events.some((event) => event.type === 'go');
+  const reversedEvents = [...execution.events].reverse();
+  const statusTag = finished
+    ? <Tag size="sm" colorScheme="green">已完成</Tag>
+    : current
+      ? <Tag size="sm" colorScheme="amber">进行中</Tag>
+      : <Tag size="sm" variant="outline">待命</Tag>;
+
+  return (
+    <Box borderWidth="1px" borderColor="whiteAlpha.100" borderRadius="xl" bg="whiteAlpha.50" p={4}>
+      <Flex align="center" mb={3}>
+        <Play size={15} color="#48bb78" />
+        <Heading size="sm" ml={1}>演出执行</Heading>
+        <Spacer />
+        {statusTag}
+      </Flex>
+
+      {!canOperate && (
+        <Alert status="info" borderRadius="lg" mb={3} py={2}>
+          <AlertIcon />
+          <AlertDescription fontSize="xs">当前角色只能查看执行记录，GO 与返工仅限舞台监督、灯光设计操作。</AlertDescription>
+        </Alert>
+      )}
+
+      {current ? (
+        <Box
+          p={3}
+          borderRadius="lg"
+          bg="blackAlpha.300"
+          borderWidth="1px"
+          borderColor={blockReasons.length ? 'red.500' : 'green.500'}
+          mb={3}
+        >
+          <Text color="whiteAlpha.500" fontSize="10px">下一条待 GO（快捷键 G）</Text>
+          <Flex align="center" gap={2} mt={0.5}>
+            <Text fontFamily="mono" fontWeight="700" color="amber.300">{current.cue.number}</Text>
+            <Text fontWeight="700" flex="1" noOfLines={1}>{current.cue.label}</Text>
+            <Tag size="sm" colorScheme={statusColors[current.cue.status]}>{statusLabels[current.cue.status]}</Tag>
+          </Flex>
+          <Text color="whiteAlpha.500" fontSize="11px" mt={0.5}>
+            {current.scene.name} · 计划 {formatTime(current.cue.startTime)}
+            {current.cue.targetNote ? ` · 触发点：${current.cue.targetNote}` : ''}
+          </Text>
+          {blockReasons.length > 0 && (
+            <Alert status="error" borderRadius="md" mt={2} py={2}>
+              <AlertIcon />
+              <Box>
+                <Text fontSize="11px" fontWeight="700">该提示不能执行，原因：</Text>
+                {blockReasons.map((reason) => (
+                  <Text key={reason} fontSize="11px">· {reason}</Text>
+                ))}
+              </Box>
+            </Alert>
+          )}
+        </Box>
+      ) : finished ? (
+        <Alert status="success" borderRadius="lg" mb={3}>
+          <AlertIcon />
+          <AlertDescription fontSize="xs">本方案提示已全部触发。可从选中的提示重新定位继续排练。</AlertDescription>
+        </Alert>
+      ) : (
+        <Text color="whiteAlpha.500" fontSize="xs" mb={3}>
+          待命状态：GO 记录会按方案保存，切换方案后仍可查看。
+        </Text>
+      )}
+
+      {canOperate && (
+        <VStack align="stretch" spacing={2} mb={3}>
+          {current ? (
+            <Button
+              colorScheme={blockReasons.length ? 'red' : 'green'}
+              leftIcon={<Play size={16} />}
+              onClick={onGo}
+              h="44px"
+              fontSize="md"
+            >
+              GO · {current.cue.number}
+            </Button>
+          ) : (
+            <Button
+              colorScheme="green"
+              isDisabled={!selectedCue}
+              leftIcon={<Play size={16} />}
+              onClick={onArm}
+            >
+              从选中的 {selectedCue?.number ?? '提示'} 开始
+            </Button>
+          )}
+          <HStack>
+            <Button
+              size="sm"
+              flex="1"
+              variant="outline"
+              isDisabled={!lastGo}
+              leftIcon={<CornerUpLeft size={14} />}
+              onClick={onBack}
+            >
+              返回上一条{lastGo ? ` ${lastGo.cueNumber}` : ''}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              isDisabled={!selectedCue}
+              leftIcon={<History size={14} />}
+              onClick={onArm}
+            >
+              定位选中
+            </Button>
+            <Button size="sm" variant="ghost" colorScheme="red" isDisabled={!execution.events.length} leftIcon={<RotateCcw size={14} />} onClick={onReset}>
+              清空
+            </Button>
+          </HStack>
+        </VStack>
+      )}
+
+      <Flex align="center" mb={2}>
+        <Text color="whiteAlpha.600" fontSize="xs">触发与返工记录</Text>
+        <Spacer />
+        <Text color="whiteAlpha.500" fontSize="10px">GO {goCount} 条 · 返工 {backCount} 次</Text>
+      </Flex>
+      <VStack align="stretch" spacing={1.5} maxH="220px" overflowY="auto" className="scroll-region">
+        {reversedEvents.map((event) => (
+          <Box key={event.id} p={2} borderRadius="md" bg="blackAlpha.200">
+            <Flex align="center" gap={2}>
+              <Text fontFamily="mono" fontSize="11px" color="whiteAlpha.400" w="62px">{formatEventClock(event.at)}</Text>
+              <Tag size="sm" colorScheme={event.type === 'go' ? 'green' : 'orange'}>
+                {event.type === 'go' ? 'GO' : '返工'}
+              </Tag>
+              <Text fontFamily="mono" fontSize="11px" color="amber.300">{event.cueNumber}</Text>
+              <Text fontSize="11px" flex="1" noOfLines={1}>{event.cueLabel}</Text>
+            </Flex>
+            {event.note ? (
+              <Text mt={1} ml="70px" fontSize="10px" color="orange.300">返工原因：{event.note}</Text>
+            ) : null}
+            <Text mt={event.note ? 0.5 : 0} ml="70px" fontSize="10px" color="whiteAlpha.400">{event.sceneName}</Text>
+          </Box>
+        ))}
+        {!execution.events.length && (
+          <Text color="whiteAlpha.400" fontSize="xs" textAlign="center" py={3}>尚无触发记录，GO 后会在此记下实际时刻。</Text>
+        )}
+      </VStack>
+    </Box>
+  );
+}
+
 export default function App() {
   const [state, dispatch] = useLightingDesk();
   const [hydrated, setHydrated] = useState(false);
@@ -586,13 +797,32 @@ export default function App() {
   const editable = canEditScene(workspace.role, activeScene);
   const freezer = canFreeze(workspace.role);
   const incompleteCount = activePlan.scenes.flatMap((scene) => scene.cues).filter((cue) => cue.status !== 'confirmed').length;
+  const execution = state.executions[activePlan.id] ?? createEmptyExecution();
+  const executionOperator = canOperateExecution(workspace.role);
+  const flatActivePlan = useMemo(() => flattenPlan(activePlan), [activePlan]);
+  const armedEntry = execution.currentCueId
+    ? flatActivePlan.find((item) => item.cue.id === execution.currentCueId)
+    : undefined;
+  const firedAtByCue = useMemo(() => {
+    const map = new Map<string, string>();
+    execution.events.forEach((event) => {
+      if (event.type === 'go') map.set(event.cueId, formatEventClock(event.at));
+    });
+    return map;
+  }, [execution.events]);
 
   useEffect(() => {
     try {
       const raw = localStorage.getItem(LIGHTING_STORAGE_KEY);
       if (raw) {
-        const parsed = JSON.parse(raw) as Workspace;
-        if (parsed.plans?.length) dispatch({ type: 'hydrate', workspace: parsed });
+        const parsed = JSON.parse(raw) as Partial<PersistedState> & Partial<Workspace>;
+        if (parsed.plans?.length) {
+          dispatch({
+            type: 'hydrate',
+            workspace: parsed as Workspace,
+            executions: parsed.executions ?? {}
+          });
+        }
       }
     } catch {
       setSyncMessage('离线草稿损坏，已载入模拟方案');
@@ -604,11 +834,12 @@ export default function App() {
   useEffect(() => {
     if (!hydrated) return;
     const timer = window.setTimeout(() => {
-      localStorage.setItem(LIGHTING_STORAGE_KEY, JSON.stringify(workspace));
+      const payload: PersistedState = { workspace, executions: state.executions };
+      localStorage.setItem(LIGHTING_STORAGE_KEY, JSON.stringify(payload));
       setSavedAt(new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }));
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [hydrated, workspace]);
+  }, [hydrated, workspace, state.executions]);
 
   useEffect(() => {
     const handleOnline = () => setOnline(true);
@@ -728,6 +959,65 @@ export default function App() {
     toast({ title: '已复制方案', status: 'success' });
   }
 
+  function armExecution() {
+    if (!executionOperator) {
+      toast({ title: '当前角色只能查看执行记录', status: 'warning', duration: 1800 });
+      return;
+    }
+    if (!selectedCue) return;
+    dispatch({ type: 'executionArm', cueId: selectedCue.id, at: new Date().toISOString() });
+  }
+
+  function goExecution() {
+    if (!executionOperator) {
+      toast({ title: '当前角色只能查看执行记录', status: 'warning', duration: 1800 });
+      return;
+    }
+    if (!armedEntry) {
+      toast({ title: '尚未定位执行提示', description: '请先选中一条提示并点击“从选中的提示开始”。', status: 'info', duration: 2400 });
+      return;
+    }
+    const reasons = cueBlockReasons(armedEntry.cue, activeConflicts);
+    if (reasons.length) {
+      toast({
+        title: `${armedEntry.cue.number} 不能执行`,
+        description: reasons.join('；'),
+        status: 'error',
+        duration: 5000
+      });
+      return;
+    }
+    const at = new Date().toISOString();
+    dispatch({ type: 'executionGo', at });
+    const flat = flatActivePlan;
+    const index = flat.findIndex((item) => item.cue.id === armedEntry.cue.id);
+    const next = flat[index + 1];
+    if (next) dispatch({ type: 'selectCue', sceneId: next.scene.id, cueId: next.cue.id });
+  }
+
+  function backExecution() {
+    if (!executionOperator) {
+      toast({ title: '当前角色只能查看执行记录', status: 'warning', duration: 1800 });
+      return;
+    }
+    const lastGo = [...execution.events].reverse().find((event) => event.type === 'go');
+    if (!lastGo) return;
+    const note = window.prompt('返工原因（会写入执行记录）', '误操作，返回重来');
+    if (note === null) return;
+    dispatch({ type: 'executionBack', at: new Date().toISOString(), note: note.trim() || '误操作，返回重来' });
+    dispatch({ type: 'selectCue', sceneId: lastGo.sceneId, cueId: lastGo.cueId });
+  }
+
+  function resetExecution() {
+    if (!executionOperator) {
+      toast({ title: '当前角色只能查看执行记录', status: 'warning', duration: 1800 });
+      return;
+    }
+    if (!execution.events.length) return;
+    if (!window.confirm('清空当前方案的全部 GO 与返工记录？')) return;
+    dispatch({ type: 'executionReset' });
+  }
+
   function jumpIncomplete() {
     const scenes = activePlan.scenes;
     const startScene = Math.max(0, scenes.findIndex((scene) => scene.id === activeScene?.id));
@@ -752,7 +1042,8 @@ export default function App() {
   async function persistNow() {
     setSyncMessage('正在模拟同步到制作服务器…');
     await new Promise((resolve) => window.setTimeout(resolve, 320));
-    localStorage.setItem(LIGHTING_STORAGE_KEY, JSON.stringify(workspace));
+    const payload: PersistedState = { workspace, executions: state.executions };
+    localStorage.setItem(LIGHTING_STORAGE_KEY, JSON.stringify(payload));
     setSavedAt(new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }));
     setSyncMessage('模拟接口返回 200，本地草稿保持一致');
     toast({ title: '当前方案已保存', description: syncMessage, status: 'success', duration: 2200 });
@@ -782,6 +1073,12 @@ export default function App() {
       if (event.altKey && event.key.toLowerCase() === 'n') {
         event.preventDefault();
         jumpIncomplete();
+      } else if (event.key.toLowerCase() === 'g') {
+        event.preventDefault();
+        goExecution();
+      } else if (event.key.toLowerCase() === 'b') {
+        event.preventDefault();
+        backExecution();
       } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         event.preventDefault();
         if (!activeScene?.cues.length) return;
@@ -804,6 +1101,7 @@ export default function App() {
     const payload = {
       exportedAt: new Date().toISOString(),
       plan: activePlan,
+      execution,
       conflicts: activeConflicts,
       role: workspace.role
     };
@@ -892,7 +1190,7 @@ export default function App() {
           <Text>最近操作：{state.lastAction}</Text>
           {savedAt ? <Text>本地草稿 {savedAt}</Text> : null}
           <Text>{syncMessage}</Text>
-          <Text ml="auto">快捷键：↑/↓ 选择 · Alt+N 下一未完成 · F 冻结/解冻 · Ctrl/⌘+Z 撤销 · Ctrl/⌘+S 保存</Text>
+          <Text ml="auto">快捷键：↑/↓ 选择 · G GO · B 返回上一条 · Alt+N 下一未完成 · F 冻结/解冻 · Ctrl/⌘+Z 撤销 · Ctrl/⌘+S 保存</Text>
         </Flex>
       </Box>
 
@@ -938,6 +1236,18 @@ export default function App() {
               </VStack>
             </Box>
 
+            <ExecutionPanel
+              plan={activePlan}
+              execution={execution}
+              selectedCue={selectedCue}
+              role={workspace.role}
+              conflicts={activeConflicts}
+              onArm={armExecution}
+              onGo={goExecution}
+              onBack={backExecution}
+              onReset={resetExecution}
+            />
+
             <Box borderWidth="1px" borderColor="whiteAlpha.100" borderRadius="xl" bg="whiteAlpha.50" p={4}>
               <Heading size="sm" mb={3}>执行概览</Heading>
               <SimpleGrid columns={2} spacing={2}>
@@ -959,10 +1269,10 @@ export default function App() {
               <Heading size="sm" mb={3}>角色权限</Heading>
               <HStack mb={3}><ShieldCheck size={17} color="#f6c453" /><Text fontSize="sm">{roleLabels[workspace.role]}</Text></HStack>
               <Text color="whiteAlpha.500" fontSize="xs" lineHeight="1.7">
-                {workspace.role === 'designer' && '可编辑所有未冻结方案与提示，也可冻结场次。'}
-                {workspace.role === 'programmer' && '可编辑通道、亮度、渐变和跟随关系；不能冻结场次。'}
-                {workspace.role === 'stage-manager' && '只能冻结或解冻场次，不能修改提示内容。'}
-                {workspace.role === 'readonly' && '只读查看所有方案、冲突和比较结果。'}
+                {workspace.role === 'designer' && '可编辑所有未冻结方案与提示、冻结场次，并可执行 GO 与返工。'}
+                {workspace.role === 'programmer' && '可编辑通道、亮度、渐变和跟随关系；不能冻结场次，演出执行只能查看记录。'}
+                {workspace.role === 'stage-manager' && '可执行 GO 与返工、冻结或解冻场次，不能修改提示内容。'}
+                {workspace.role === 'readonly' && '只读查看所有方案、冲突、比较结果与执行记录。'}
               </Text>
             </Box>
 
@@ -1042,6 +1352,8 @@ export default function App() {
               <CueList
                 scene={activeScene}
                 selectedCueId={workspace.selectedCueId}
+                armedCueId={execution.currentCueId}
+                firedAtByCue={firedAtByCue}
                 canEdit={editable}
                 conflicts={activeConflicts}
                 onSelect={(cueId) => selectCue(activeScene.id, cueId)}
@@ -1135,7 +1447,7 @@ export default function App() {
 
           <Box mt={4} p={3} borderRadius="lg" borderWidth="1px" borderStyle="dashed" borderColor="whiteAlpha.200" color="whiteAlpha.500" fontSize="xs" lineHeight="1.7">
             <Text color="whiteAlpha.700" fontWeight="700" mb={1}>读屏与键盘说明</Text>
-            每条提示均声明编号、名称、状态与冲突数量。拖动把手可用键盘聚焦后使用方向键排序；编辑表单均带明确标签。
+            每条提示均声明编号、名称、状态与冲突数量；待 GO 与实际触发时刻会在提示行读屏标签中说明。拖动把手可用键盘聚焦后使用方向键排序；编辑表单均带明确标签；演出执行可用 G 触发、B 返回上一条。
           </Box>
         </Box>
       </Grid>

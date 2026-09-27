@@ -60,8 +60,29 @@ export interface Workspace {
   role: UserRole;
 }
 
+export type ExecutionEventType = 'go' | 'back';
+
+export interface ExecutionEvent {
+  id: string;
+  type: ExecutionEventType;
+  cueId: string;
+  cueNumber: string;
+  cueLabel: string;
+  sceneId: string;
+  sceneName: string;
+  at: string;
+  note?: string;
+}
+
+export interface PlanExecution {
+  currentCueId: string;
+  startedAt: string;
+  events: ExecutionEvent[];
+}
+
 export interface EditorState {
   workspace: Workspace;
+  executions: Record<string, PlanExecution>;
   past: Workspace[];
   future: Workspace[];
   lastAction: string;
@@ -69,4 +90,5 @@ export interface EditorState {
 
 export interface PersistedState {
   workspace: Workspace;
+  executions: Record<string, PlanExecution>;
 }

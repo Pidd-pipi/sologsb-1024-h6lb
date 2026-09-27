@@ -35,6 +35,15 @@ select {
   box-shadow: inset 3px 0 0 #60a5fa;
 }
 
+.cue-row.armed {
+  background: rgba(72, 187, 120, 0.1);
+  box-shadow: inset 3px 0 0 #48bb78;
+}
+
+.cue-row.armed:hover {
+  background: rgba(72, 187, 120, 0.16);
+}
+
 .cue-row.dragging {
   opacity: 0.5;
   z-index: 20;

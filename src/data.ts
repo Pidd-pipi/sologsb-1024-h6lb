@@ -1,4 +1,4 @@
-import type { Cue, CueConflict, LightingPlan, Scene, UserRole } from './types';
+import type { Cue, CueConflict, LightingPlan, PlanExecution, Scene, UserRole } from './types';
 
 const FIXED_TIME = '2026-09-25T02:00:00.000Z';
 
@@ -135,6 +135,27 @@ const tourPlan: LightingPlan = {
 };
 
 export const samplePlans = [mainPlan, coolPlan, tourPlan];
+
+export function createEmptyExecution(): PlanExecution {
+  return { currentCueId: '', startedAt: '', events: [] };
+}
+
+export function flattenPlan(plan: LightingPlan): { scene: Scene; cue: Cue }[] {
+  return [...plan.scenes]
+    .sort((a, b) => a.order - b.order)
+    .flatMap((scene) => scene.cues.map((cue) => ({ scene, cue })));
+}
+
+export function cueBlockReasons(cue: Cue, conflicts: CueConflict[]): string[] {
+  const reasons: string[] = [];
+  if (cue.status !== 'confirmed') {
+    reasons.push(`提示未确认（当前状态：${statusLabels[cue.status]}），需灯光设计确认后才能执行`);
+  }
+  conflicts
+    .filter((item) => item.cueId === cue.id && item.severity === 'error')
+    .forEach((item) => reasons.push(`存在阻断冲突：${item.message}`));
+  return reasons;
+}
 
 export function recalculatePlans(plans: LightingPlan[]) {
   for (const plan of plans) {

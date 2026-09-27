@@ -1,6 +1,21 @@
 import { useReducer } from 'react';
-import { recalculatePlans, samplePlans } from '../data';
-import type { Cue, EditorState, LightingPlan, Scene, UserRole, Workspace } from '../types';
+import {
+  createEmptyExecution,
+  cueBlockReasons,
+  detectConflicts,
+  flattenPlan,
+  recalculatePlans,
+  samplePlans
+} from '../data';
+import type {
+  Cue,
+  EditorState,
+  LightingPlan,
+  PlanExecution,
+  Scene,
+  UserRole,
+  Workspace
+} from '../types';
 
 export const LIGHTING_STORAGE_KEY = 'sologsb-1024/lighting-cue-desk/v1';
 
@@ -23,6 +38,7 @@ export function createInitialWorkspace(): Workspace {
 export function createInitialState(): EditorState {
   return {
     workspace: createInitialWorkspace(),
+    executions: {},
     past: [],
     future: [],
     lastAction: '已载入示例灯光方案'
@@ -30,13 +46,17 @@ export function createInitialState(): EditorState {
 }
 
 export type EditorAction =
-  | { type: 'hydrate'; workspace: Workspace }
+  | { type: 'hydrate'; workspace: Workspace; executions?: Record<string, PlanExecution> }
   | { type: 'commit'; label: string; mutate: (workspace: Workspace) => void }
   | { type: 'selectScene'; sceneId: string }
   | { type: 'selectCue'; sceneId: string; cueId: string }
   | { type: 'selectPlan'; planId: string }
   | { type: 'comparePlan'; planId: string }
   | { type: 'setRole'; role: UserRole }
+  | { type: 'executionArm'; cueId: string; at: string }
+  | { type: 'executionGo'; at: string }
+  | { type: 'executionBack'; at: string; note: string }
+  | { type: 'executionReset' }
   | { type: 'undo' }
   | { type: 'redo' };
 
@@ -62,6 +82,7 @@ export function lightingReducer(state: EditorState, action: EditorAction): Edito
     case 'hydrate':
       return {
         workspace: normalizeWorkspace(clone(action.workspace)),
+        executions: clone(action.executions ?? {}),
         past: [],
         future: [],
         lastAction: '已恢复离线灯光草稿'
@@ -74,6 +95,7 @@ export function lightingReducer(state: EditorState, action: EditorAction): Edito
       if (active) active.updatedAt = new Date().toISOString();
       return {
         workspace: next,
+        executions: state.executions,
         past: [...state.past.slice(-49), clone(state.workspace)],
         future: [],
         lastAction: action.label
@@ -120,11 +142,107 @@ export function lightingReducer(state: EditorState, action: EditorAction): Edito
       return { ...state, workspace: { ...state.workspace, comparePlanId: action.planId } };
     case 'setRole':
       return { ...state, workspace: { ...state.workspace, role: action.role } };
+    case 'executionArm': {
+      if (!canOperateExecution(state.workspace.role)) return state;
+      const plan = findActivePlan(state.workspace);
+      const target = flattenPlan(plan).find((item) => item.cue.id === action.cueId);
+      if (!target) return state;
+      const current = state.executions[plan.id] ?? createEmptyExecution();
+      const execution: PlanExecution = {
+        ...current,
+        currentCueId: target.cue.id,
+        startedAt: current.startedAt || action.at,
+        events: [...current.events]
+      };
+      return {
+        ...state,
+        executions: { ...state.executions, [plan.id]: execution },
+        lastAction: `执行定位到 ${target.cue.number} · ${target.cue.label}`
+      };
+    }
+    case 'executionGo': {
+      if (!canOperateExecution(state.workspace.role)) return state;
+      const plan = findActivePlan(state.workspace);
+      const current = state.executions[plan.id];
+      if (!current?.currentCueId) return state;
+      const flat = flattenPlan(plan);
+      const index = flat.findIndex((item) => item.cue.id === current.currentCueId);
+      if (index < 0) return state;
+      const { cue, scene } = flat[index];
+      const blocked = cueBlockReasons(cue, detectConflicts([plan]));
+      if (blocked.length) return state;
+      const next = flat[index + 1];
+      const execution: PlanExecution = {
+        currentCueId: next?.cue.id ?? '',
+        startedAt: current.startedAt || action.at,
+        events: [
+          ...current.events,
+          {
+            id: `evt-${Date.now().toString(36)}-${current.events.length}`,
+            type: 'go',
+            cueId: cue.id,
+            cueNumber: cue.number,
+            cueLabel: cue.label,
+            sceneId: scene.id,
+            sceneName: scene.name,
+            at: action.at
+          }
+        ]
+      };
+      return {
+        ...state,
+        executions: { ...state.executions, [plan.id]: execution },
+        lastAction: next
+          ? `GO ${cue.number} · ${cue.label}，下一条 ${next.cue.number}`
+          : `GO ${cue.number} · ${cue.label}，本方案提示已全部触发`
+      };
+    }
+    case 'executionBack': {
+      if (!canOperateExecution(state.workspace.role)) return state;
+      const plan = findActivePlan(state.workspace);
+      const current = state.executions[plan.id];
+      const lastGo = current ? [...current.events].reverse().find((event) => event.type === 'go') : undefined;
+      if (!current || !lastGo) return state;
+      const execution: PlanExecution = {
+        ...current,
+        currentCueId: lastGo.cueId,
+        events: [
+          ...current.events,
+          {
+            id: `evt-${Date.now().toString(36)}-${current.events.length}`,
+            type: 'back',
+            cueId: lastGo.cueId,
+            cueNumber: lastGo.cueNumber,
+            cueLabel: lastGo.cueLabel,
+            sceneId: lastGo.sceneId,
+            sceneName: lastGo.sceneName,
+            at: action.at,
+            note: action.note
+          }
+        ]
+      };
+      return {
+        ...state,
+        executions: { ...state.executions, [plan.id]: execution },
+        lastAction: `返工：回到 ${lastGo.cueNumber} · ${lastGo.cueLabel}`
+      };
+    }
+    case 'executionReset': {
+      if (!canOperateExecution(state.workspace.role)) return state;
+      const plan = findActivePlan(state.workspace);
+      if (!state.executions[plan.id]) return state;
+      return {
+        ...state,
+        executions: { ...state.executions, [plan.id]: createEmptyExecution() },
+        lastAction: '已清空当前方案的执行记录'
+      };
+    }
     case 'undo': {
       const previous = state.past.at(-1);
       if (!previous) return state;
       return {
         workspace: clone(previous),
+        executions: state.executions,
         past: state.past.slice(0, -1),
         future: [clone(state.workspace), ...state.future].slice(0, 50),
         lastAction: '已撤销上一步操作'
@@ -135,6 +253,7 @@ export function lightingReducer(state: EditorState, action: EditorAction): Edito
       if (!next) return state;
       return {
         workspace: clone(next),
+        executions: state.executions,
         past: [...state.past, clone(state.workspace)].slice(-50),
         future: state.future.slice(1),
         lastAction: '已重做上一步操作'
@@ -166,6 +285,10 @@ export function canEditScene(role: UserRole, scene: Scene | undefined) {
 }
 
 export function canFreeze(role: UserRole) {
+  return role === 'designer' || role === 'stage-manager';
+}
+
+export function canOperateExecution(role: UserRole) {
   return role === 'designer' || role === 'stage-manager';
 }
 
