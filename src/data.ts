@@ -136,8 +136,15 @@ const tourPlan: LightingPlan = {
 
 export const samplePlans = [mainPlan, coolPlan, tourPlan];
 
+export function flattenPlanCues(plan: LightingPlan): { scene: Scene; cue: Cue }[] {
+  return [...plan.scenes]
+    .sort((a, b) => a.order - b.order)
+    .flatMap((scene) => scene.cues.map((cue) => ({ scene, cue })));
+}
+
 export function recalculatePlans(plans: LightingPlan[]) {
   for (const plan of plans) {
+    if (!plan.execution) plan.execution = { activeCueId: '', events: [] };
     const scenes = [...plan.scenes].sort((a, b) => a.order - b.order);
     let absoluteCursor = 0;
     for (const scene of scenes) {

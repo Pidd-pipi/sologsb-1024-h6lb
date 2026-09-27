@@ -33,12 +33,31 @@ export interface Scene {
   cues: Cue[];
 }
 
+export type ExecutionEventKind = 'start' | 'go' | 'back';
+
+export interface ExecutionEvent {
+  id: string;
+  cueId: string;
+  cueNumber: string;
+  cueLabel: string;
+  kind: ExecutionEventKind;
+  at: string;
+  operator: UserRole;
+  note: string;
+}
+
+export interface PlanExecution {
+  activeCueId: string;
+  events: ExecutionEvent[];
+}
+
 export interface LightingPlan {
   id: string;
   name: string;
   description: string;
   updatedAt: string;
   scenes: Scene[];
+  execution?: PlanExecution;
 }
 
 export interface CueConflict {

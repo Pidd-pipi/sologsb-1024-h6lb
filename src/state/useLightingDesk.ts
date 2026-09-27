@@ -1,6 +1,6 @@
 import { useReducer } from 'react';
-import { recalculatePlans, samplePlans } from '../data';
-import type { Cue, EditorState, LightingPlan, Scene, UserRole, Workspace } from '../types';
+import { flattenPlanCues, recalculatePlans, samplePlans } from '../data';
+import type { Cue, EditorState, ExecutionEvent, LightingPlan, Scene, UserRole, Workspace } from '../types';
 
 export const LIGHTING_STORAGE_KEY = 'sologsb-1024/lighting-cue-desk/v1';
 
@@ -37,11 +37,39 @@ export type EditorAction =
   | { type: 'selectPlan'; planId: string }
   | { type: 'comparePlan'; planId: string }
   | { type: 'setRole'; role: UserRole }
+  | { type: 'startExecution'; cueId: string }
+  | { type: 'goCue' }
+  | { type: 'backCue' }
   | { type: 'undo' }
   | { type: 'redo' };
 
+function createExecutionEvent(
+  kind: ExecutionEvent['kind'],
+  cue: Cue,
+  operator: UserRole,
+  note: string,
+  sequence: number
+): ExecutionEvent {
+  return {
+    id: `evt-${Date.now().toString(36)}-${sequence}-${Math.random().toString(36).slice(2, 6)}`,
+    cueId: cue.id,
+    cueNumber: cue.number,
+    cueLabel: cue.label,
+    kind,
+    at: new Date().toISOString(),
+    operator,
+    note
+  };
+}
+
 function normalizeWorkspace(workspace: Workspace) {
   recalculatePlans(workspace.plans);
+  for (const plan of workspace.plans) {
+    const execution = plan.execution;
+    if (execution?.activeCueId && !flattenPlanCues(plan).some((item) => item.cue.id === execution.activeCueId)) {
+      execution.activeCueId = '';
+    }
+  }
   const active = workspace.plans.find((plan) => plan.id === workspace.activePlanId) ?? workspace.plans[0];
   if (!active) return workspace;
   workspace.activePlanId = active.id;
@@ -120,6 +148,65 @@ export function lightingReducer(state: EditorState, action: EditorAction): Edito
       return { ...state, workspace: { ...state.workspace, comparePlanId: action.planId } };
     case 'setRole':
       return { ...state, workspace: { ...state.workspace, role: action.role } };
+    case 'startExecution': {
+      const next = clone(state.workspace);
+      const plan = next.plans.find((item) => item.id === next.activePlanId);
+      if (!plan?.execution) return state;
+      const target = flattenPlanCues(plan).find((item) => item.cue.id === action.cueId);
+      if (!target) return state;
+      plan.execution.activeCueId = target.cue.id;
+      plan.execution.events.push(
+        createExecutionEvent('start', target.cue, state.workspace.role, `从 ${target.scene.name} · ${target.cue.number} 开始执行`, plan.execution.events.length)
+      );
+      next.selectedSceneId = target.scene.id;
+      next.selectedCueId = target.cue.id;
+      return { ...state, workspace: next, lastAction: `执行指针定位到 ${target.cue.number}` };
+    }
+    case 'goCue': {
+      const next = clone(state.workspace);
+      const plan = next.plans.find((item) => item.id === next.activePlanId);
+      const execution = plan?.execution;
+      if (!plan || !execution?.activeCueId) return state;
+      const flat = flattenPlanCues(plan);
+      const index = flat.findIndex((item) => item.cue.id === execution.activeCueId);
+      if (index < 0) return state;
+      const current = flat[index];
+      const upcoming = flat[index + 1];
+      execution.events.push(
+        createExecutionEvent(
+          'go',
+          current.cue,
+          state.workspace.role,
+          upcoming ? `实际触发，推进到 ${upcoming.cue.number}` : '实际触发，当前方案最后一条，执行完成',
+          execution.events.length
+        )
+      );
+      execution.activeCueId = upcoming?.cue.id ?? '';
+      if (upcoming) {
+        next.selectedSceneId = upcoming.scene.id;
+        next.selectedCueId = upcoming.cue.id;
+      }
+      return { ...state, workspace: next, lastAction: `GO ${current.cue.number} ${current.cue.label}` };
+    }
+    case 'backCue': {
+      const next = clone(state.workspace);
+      const plan = next.plans.find((item) => item.id === next.activePlanId);
+      const execution = plan?.execution;
+      if (!plan || !execution?.events.length) return state;
+      const flat = flattenPlanCues(plan);
+      const index = flat.findIndex((item) => item.cue.id === execution.activeCueId);
+      const prevIndex = index === -1 ? flat.length - 1 : index - 1;
+      const target = flat[prevIndex];
+      if (!target) return state;
+      const from = index === -1 ? '末尾' : flat[index].cue.number;
+      execution.activeCueId = target.cue.id;
+      execution.events.push(
+        createExecutionEvent('back', target.cue, state.workspace.role, `返工：从 ${from} 返回 ${target.cue.number}，需重新 GO`, execution.events.length)
+      );
+      next.selectedSceneId = target.scene.id;
+      next.selectedCueId = target.cue.id;
+      return { ...state, workspace: next, lastAction: `返工回到 ${target.cue.number}` };
+    }
     case 'undo': {
       const previous = state.past.at(-1);
       if (!previous) return state;
@@ -166,6 +253,10 @@ export function canEditScene(role: UserRole, scene: Scene | undefined) {
 }
 
 export function canFreeze(role: UserRole) {
+  return role === 'designer' || role === 'stage-manager';
+}
+
+export function canOperateShow(role: UserRole) {
   return role === 'designer' || role === 'stage-manager';
 }
 
