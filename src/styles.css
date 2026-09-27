@@ -1,0 +1,103 @@
+* {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  overflow-x: hidden;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.focus-ring:focus-visible {
+  outline: 3px solid #f6c453;
+  outline-offset: 2px;
+}
+
+.cue-row {
+  transition: background-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.cue-row:hover {
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.cue-row.active {
+  background: rgba(59, 130, 246, 0.13);
+  box-shadow: inset 3px 0 0 #60a5fa;
+}
+
+.cue-row.dragging {
+  opacity: 0.5;
+  z-index: 20;
+}
+
+.color-swatch {
+  width: 12px;
+  height: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 999px;
+}
+
+.timeline-track {
+  position: relative;
+  display: flex;
+  min-height: 46px;
+  align-items: stretch;
+  gap: 2px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.timeline-block {
+  min-width: 20px;
+  border: 0;
+  padding: 7px 5px;
+  overflow: hidden;
+  color: #fff;
+  font-size: 10px;
+  text-align: left;
+  cursor: pointer;
+  transition: filter 140ms ease, transform 140ms ease;
+}
+
+.timeline-block:hover,
+.timeline-block:focus-visible {
+  filter: brightness(1.18);
+  transform: translateY(-1px);
+}
+
+.scroll-region {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.scroll-region::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.scroll-region::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.17);
+}
+
+@media (max-width: 1100px) {
+  .desk-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .side-panel {
+    position: static !important;
+    max-height: none !important;
+  }
+}
